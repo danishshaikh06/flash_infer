@@ -7,7 +7,7 @@ import triton.language as tl
 def score_tile_kernel(
     Q,
     K,
-    OUT,
+    OUT_MAX,
     stride_qm,
     stride_qd,
     stride_kn,
@@ -41,12 +41,18 @@ def score_tile_kernel(
         other=0.0, 
     )
 
+    # Intialize the running maximum as -inf 
+    m_i = tl.full(
+        [BLOCK_M],
+        -float("inf"),
+        dtype=tl.float32,
+    )
+
     for start_n in range(0, N, BLOCK_N):
 
         offs_n = start_n + tl.arange(0,BLOCK_N)
 
         k_mask = offs_n < N
-
 
         # K: [BLOCK_N, D]
         k_ptrs = (
@@ -67,51 +73,87 @@ def score_tile_kernel(
             tl.trans(k),
         )
 
-        # Store score tile
+        # tl.where(condition, A, B)
+        # For every element, if condition is True, choose A; otherwise choose B.
+        scores = tl.where( 
+            k_mask[None, :], # broadcasting [[True,False] [True, False]]
+            scores,
+            -float("inf"),
+        )
+
+        #one max per query row 
+        m_ij = tl.max(
+            scores,
+            axis=1,
+        )
+
+        # compare the previou and new 
+        m_i = tl.maximum(
+            m_i,
+            m_ij,
+        )
+
+        # for 1-d tensors 
+        out_ptrs = (
+            OUT_MAX + offs_m
+        )
+
+        '''
+        # Store score tile fo N - Dimensions
         out_ptrs = (
             OUT
             + offs_m[:, None] * BLOCK_N
             + offs_n[None, :]
-        )
+        )'''
 
+        
         tl.store(
             out_ptrs,
-            scores,
-            mask=q_mask[:, None] & k_mask[None, :],
+            m_i,
+            mask=q_mask,
+            #scores,
+            #mask=q_mask[:, None] & k_mask[None, :],
         )
 
 
 def demo():
+    D = 16
     Q = torch.rand(
-    (16,16),
+    (4,D),
     device="cuda",
-    dtype=torch.float16,
+    dtype=torch.float32,
     )
 
     K = torch.rand(
-        (16,16),
+        (4,D),
         device="cuda",
-        dtype=torch.float16,
+        dtype=torch.float32,
     )
 
     BLOCK_M = 2
     BLOCK_N = 2
-    D = 16
 
-    # For now, one output tile
+    OUT_MAX = torch.empty(
+        (4,),
+        device="cuda",
+        dtype=torch.float32,
+    )
+
+    '''# For now, one output tile
     OUT = torch.zeros(
         (16, 16),
         device="cuda",
-        dtype=torch.float16,
-    )
+        dtype=torch.float32,
+    )'''
+
     N = Q.shape[0]
-    grid = (triton.cdiv(N, BLOCK_M),)
-    #grid = (1,)
+    #grid = (triton.cdiv(N, BLOCK_M),)
+    grid = (1,)
 
     score_tile_kernel[grid](
         Q,
         K,
-        OUT,
+        OUT_MAX,
         Q.stride(0),
         Q.stride(1),
         K.stride(0),
@@ -121,8 +163,9 @@ def demo():
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
     )
-
-    print(OUT)
+    print("Final row-wise maximum:")
+    print(OUT_MAX[:2])
+    #print(OUT)
 
 if __name__ == "__main__":
     demo()
