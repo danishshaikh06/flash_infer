@@ -82,29 +82,17 @@ def score_tile_kernel(
 
 
 def demo():
-    Q = torch.zeros(
+    Q = torch.rand(
     (16,16),
     device="cuda",
-    dtype=torch.float32,
+    dtype=torch.float16,
     )
 
-    K = torch.zeros(
+    K = torch.rand(
         (16,16),
         device="cuda",
-        dtype=torch.float32,
+        dtype=torch.float16,
     )
-
-    Q[0, 0] = 1.0
-    Q[1, 1] = 1.0
-
-    K[0, 0] = 1.0
-    K[1, 1] = 1.0
-
-    K[2, 0] = 1.0
-    K[2, 1] = 1.0
-
-    K[3, 0] = 2.0
-    K[3, 1] = 1.0
 
     BLOCK_M = 2
     BLOCK_N = 2
@@ -114,10 +102,11 @@ def demo():
     OUT = torch.zeros(
         (16, 16),
         device="cuda",
-        dtype=torch.float32,
+        dtype=torch.float16,
     )
-
-    grid = (1,)
+    N = Q.shape[0]
+    grid = (triton.cdiv(N, BLOCK_M),)
+    #grid = (1,)
 
     score_tile_kernel[grid](
         Q,
