@@ -1,5 +1,48 @@
 # FlashAttention — Detailed Notes
 
+                    Triton                    CUDA
+
+Program instance    program                   thread block
+                    ↓                         ↓
+                    pid                       blockIdx.x
+
+Q tile              BLOCK_M rows              block's data tile
+
+K tile              BLOCK_N rows              processed inside loop
+
+grid=(8,)            8 programs                <<<8, ...>>>
+
+grid = (1,)
+
+1 PROGRAM
+    │
+    └── Q block 0
+          │
+          ├── K block 0
+          ├── K block 1
+          ├── K block 2
+          ├── K block 3
+          ├── K block 4
+          ├── K block 5
+          ├── K block 6
+          └── K block 7
+
+grid = (8,)
+
+8 PROGRAMS
+    │
+    ├── Program 0 → Q0 → K0 K1 K2 ... K7
+    ├── Program 1 → Q1 → K0 K1 K2 ... K7
+    ├── Program 2 → Q2 → K0 K1 K2 ... K7
+    ├── Program 3 → Q3 → K0 K1 K2 ... K7
+    ├── Program 4 → Q4 → K0 K1 K2 ... K7
+    ├── Program 5 → Q5 → K0 K1 K2 ... K7
+    ├── Program 6 → Q6 → K0 K1 K2 ... K7
+    └── Program 7 → Q7 → K0 K1 K2 ... K7
+
+Note: One program is responsible for one Q tile, and it loops over all 8 K tiles.
+
+
 ### Progress covered so far: Q/K tiling → Triton programs → pointer arithmetic → strides → score tiles → masking → running maximum
 
 ---
@@ -1055,18 +1098,11 @@ It calculates:
 
 Mathematically:
 
-[
-\boxed{
 address(Q[m,d])
-===============
-
-Q_{\text{base}}
-+
-m\cdot stride_{qm}
-+
-d\cdot stride_{qd}
-}
-]
+=
+Q_base
++ m × stride_qm
++ d × stride_qd
 
 ---
 
@@ -1140,13 +1176,29 @@ becomes:
 
 ```text
 [[0,1,2,3]]
+
 ```
+They can be broadcast together.
+The smaller dimension gets repeated.
+
+So:
+
+[[0],        [[0,1,2,3]]
+ [1]]
+
+Becomes Conceptually:
+
+[[0,0,0,0],    [[0,1,2,3]
+
+[1,1,1,1]]       [0,1,2,3]]
+
+
 
 Add them:
 
 ```text
 [[0,1,2,3],
- [4,5,6,7]]
+ [1,2,3,4]]
 ```
 
 These are exactly the memory positions of:
@@ -1156,6 +1208,47 @@ Q[0,0] Q[0,1] Q[0,2] Q[0,3]
 
 Q[1,0] Q[1,1] Q[1,2] Q[1,3]
 ```
+This gives us the memory offset for every (row, column) pair.
+
+Q:(2,4)
+
+          columns
+        0    1    2    3
+      ┌────┬────┬────┬────┐
+row 0 │ Q00│ Q01│ Q02│ Q03│
+      ├────┼────┼────┼────┤
+row 1 │ Q10│ Q11│ Q12│ Q13│
+      └────┴────┴────┴────┘
+
+So:
+Q[0,0] → offset 0
+Q[0,1] → offset 1
+Q[0,2] → offset 2
+Q[0,3] → offset 3
+
+Q[1,0] → offset 4
+Q[1,1] → offset 5
+Q[1,2] → offset 6
+Q[1,3] → offset 7
+
+That's exactly:
+[[0,1,2,3],
+ [4,5,6,7]]
+
+ The formula was:
+
+address(Q[m,d]) =
+Q_base
++ m × stride_qm
++ d × stride_qd
+
+For Q[0,0]:
+0 × 4 + 0 × 1 = 0
+
+For Q[0,1]:
+0 × 4 + 1 × 1 = 1
+
+and so on.....
 
 ---
 
@@ -2725,4 +2818,6 @@ A_{\text{base}}
 +j\cdot stride_1
 }
 ]
+
+
 
