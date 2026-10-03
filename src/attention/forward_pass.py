@@ -98,6 +98,7 @@ def flash_attention_forward_kernel(
         scores = tl.dot(
             q,
             tl.trans(k),
+            input_precision = "ieee",
         )
         scores*scale
 
