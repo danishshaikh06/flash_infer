@@ -105,6 +105,7 @@ token 1  → [q10 q11 q12 ... q1,15]
 token 2  → [q20 q21 q22 ... q2,15]
 ...
 token 15
+
 ````
 
  Each token has a feature vector of size $D=16$.
