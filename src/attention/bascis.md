@@ -1,5 +1,3 @@
-Here’s a cleaned-up, GitHub-ready version that keeps your notes essentially **as-is**, while fixing the broken Markdown/LaTeX formatting and improving readability.
-
  # FlashAttention — Detailed Notes
 
  ### Progress covered so far
@@ -38,9 +36,7 @@ $$
 
  and then:
 
- $$
-P = \operatorname{softmax}(S)
-$$
+p = softmax(S)
 
  and finally:
 
@@ -265,19 +261,19 @@ $$
  For example:
 
  $$
-Q_0\cdot K_2
-=
-[1,0]\cdot[1,1]
-=1
+Q₀ · K₂
+= (1 × 1) + (0 × 1)
+= 1 + 0
+= 1
 $$
 
  and:
 
  $$
-Q_1\cdot K_3
-=
-[0,1]\cdot[2,1]
-=1
+Q₁ · K₃
+= (0 × 2) + (1 × 1)
+= 0 + 1
+= 1
 $$
 
 ---
