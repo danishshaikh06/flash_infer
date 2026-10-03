@@ -105,7 +105,6 @@ token 1  → [q10 q11 q12 ... q1,15]
 token 2  → [q20 q21 q22 ... q2,15]
 ...
 token 15
-
 ````
 
  Each token has a feature vector of size $D=16$.
@@ -272,7 +271,7 @@ Q_0\cdot K_2
 1
 $$
 
- And:
+ and:
 
  $$
 Q_1\cdot K_3
@@ -314,7 +313,7 @@ $$
 
  That's a huge matrix.
 
- For larger sequence lengths it becomes even worse because attention has:
+ And for larger sequence lengths it becomes even worse because attention has:
 
  $$
 \boxed{O(N^2)}
@@ -326,7 +325,7 @@ $$
 
 ---
 
- # 7\. What Is a Block / Tile?
+ # 7\. What Is a Block/Tile?
 
  Instead of processing:
 
@@ -391,8 +390,7 @@ $$
  Divide it into $2\\times2$ tiles:
 
 ```
-                    K blocks
-
+                  K blocks
              0    1    2    3    4    5    6    7
           ┌────┬────┬────┬────┬────┬────┬────┬────┐
 Q block 0 │    │    │    │    │    │    │    │    │
@@ -401,16 +399,7 @@ Q block 1 │    │    │    │    │    │    │    │    │
           ├────┼────┼────┼────┼────┼────┼────┼────┤
 Q block 2 │    │    │    │    │    │    │    │    │
           ├────┼────┼────┼────┼────┼────┼────┼────┤
-Q block 3 │    │    │    │    │    │    │    │    │
-          ├────┼────┼────┼────┼────┼────┼────┼────┤
-Q block 4 │    │    │    │    │    │    │    │    │
-          ├────┼────┼────┼────┼────┼────┼────┼────┤
-Q block 5 │    │    │    │    │    │    │    │    │
-          ├────┼────┼────┼────┼────┼────┼────┼────┤
-Q block 6 │    │    │    │    │    │    │    │    │
-          ├────┼────┼────┼────┼────┼────┼────┼────┤
-Q block 7 │    │    │    │    │    │    │    │    │
-          └────┴────┴────┴────┴────┴────┴────┴────┘
+...
 ```
 
  There are:
@@ -427,7 +416,7 @@ $$
 2\times2
 $$
 
- Therefore:
+ and:
 
  $$
 64\times4=256=16\times16
@@ -439,7 +428,7 @@ $$
 
  A Triton **program** is roughly a unit of work that executes on the GPU.
 
- You might write:
+ You wrote:
 
 ```
 grid = (1,)
@@ -463,7 +452,7 @@ pid_m = tl.program_id(0)
 pid_m = 0
 ```
 
- So that program processes Q block 0.
+ So your program processes Q block 0.
 
 ---
 
@@ -569,7 +558,7 @@ Program 7 → Q7 → K0 K1 K2 K3 K4 K5 K6 K7
 
 ---
 
- # 12\. `pid_m`
+ # 12\. pid\_m
 
  Your code:
 
@@ -607,7 +596,7 @@ Q block 3
 
 ---
 
- # 13\. `offs_m`
+ # 13\. offs\_m
 
  You have:
 
@@ -631,13 +620,11 @@ BLOCK_M = 2
 offs_m=3\times2+[0,1]
 $$
 
- Therefore:
-
  $$
 \boxed{offs_m=[6,7]}
 $$
 
- So this program processes:
+ Therefore this program processes:
 
 ```
 Q rows 6 and 7
@@ -645,7 +632,7 @@ Q rows 6 and 7
 
 ---
 
- # 14\. `tl.arange`
+ # 14\. tl.arange
 
  When you write:
 
@@ -677,17 +664,17 @@ BLOCK_M = 4
 [0,1,2,3]
 $$
 
- It is similar conceptually to:
+ It's similar conceptually to:
 
 ```
 range(0, BLOCK_M)
 ```
 
- but it is a Triton tensor of offsets used for vectorized GPU operations.
+ but it's a Triton tensor of offsets used for vectorized GPU operations.
 
 ---
 
- # 15\. `offs_d`
+ # 15\. offs\_d
 
  You have:
 
@@ -757,7 +744,7 @@ Q block
 
 ---
 
- # 17\. `[:, None]` and `[None, :]`
+ # 17\. \[:, None\] and \[None, :\]
 
  This is extremely important.
 
@@ -810,7 +797,7 @@ offs_d = [0,1,2,3]
 [[0,1,2,3]]
 ```
 
- with shape:
+ shape:
 
  $$
 [1,4]
@@ -820,95 +807,35 @@ $$
 
  # 18\. Why Do We Do That?
 
- Because broadcasting gives all combinations of row and column indices.
-
- We start with:
+ Because broadcasting gives:
 
 ```
-offs_m[:, None]     offs_d[None, :]
+offs_m[:,None]      offs_d[None,:]
 
 [0]                 [0 1 2 3]
 [1]
 ```
 
- The first tensor has shape:
+ which broadcasts into:
 
 ```
-[2,1]
-```
-
- The second has shape:
-
-```
-[1,4]
-```
-
- Broadcasting expands them conceptually to:
-
-```
-Row offsets:
-
-[0 0 0 0]
-[1 1 1 1]
-```
-
- and:
-
-```
-Column offsets:
-
 [0 1 2 3]
 [0 1 2 3]
 ```
 
- Now add them:
-
-```
-[0 1 2 3]
-[1 2 3 4]
-```
-
- These are all combinations of:
+ This creates all combinations:
 
  $$
 (m,d)
 $$
 
- However, when calculating actual Q memory positions, the row offsets must first be multiplied by the row stride.
+ So we get:
 
- That is:
+ $$
+[BLOCK_M,D]
+$$
 
-```
-offs_m[:, None] * stride_qm
-```
-
- With:
-
-```
-stride_qm = 4
-```
-
- we get:
-
-```
-[0]
-[4]
-```
-
- Broadcasting this with:
-
-```
-[0 1 2 3]
-```
-
- gives:
-
-```
-[0 1 2 3]
-[4 5 6 7]
-```
-
- These are the correct memory offsets.
+ addresses.
 
 ---
 
@@ -937,7 +864,7 @@ memory address of Q[0,0]
 
 ---
 
- # 20\. `Q.stride()`
+ # 20\. Q.stride()
 
  Suppose:
 
@@ -1103,7 +1030,7 @@ $$
 
 ---
 
- # 25\. The Famous `q_ptrs`
+ # 25\. The Famous q\_ptrs
 
  Your code:
 
@@ -1126,20 +1053,18 @@ $$
  Mathematically:
 
  $$
-\boxed{
 address(Q[m,d])
 =
-Q_{\text{base}}
+Q_{base}
 +
-m\cdot stride_{qm}
+m\times stride_{qm}
 +
-d\cdot stride_{qd}
-}
+d\times stride_{qd}
 $$
 
 ---
 
- # 26\. Numerical Example for `q_ptrs`
+ # 26\. Numerical Example for q\_ptrs
 
  Suppose:
 
@@ -1174,7 +1099,7 @@ offs_m[:,None]
  [1]]
 ```
 
- And:
+ and:
 
 ```
 offs_d[None,:]
@@ -1211,16 +1136,31 @@ $$
 [[0,1,2,3]]
 ```
 
- Broadcast them together:
+ They can be broadcast together.
+
+ The smaller dimension gets repeated.
+
+ Conceptually:
 
 ```
-Row contribution:
+[[0],
+ [4]]
+```
 
+ becomes:
+
+```
 [[0,0,0,0],
  [4,4,4,4]]
 ```
 
- Column contribution:
+ while:
+
+```
+[[0,1,2,3]]
+```
+
+ becomes:
 
 ```
 [[0,1,2,3],
@@ -1242,7 +1182,7 @@ Q[0,0] Q[0,1] Q[0,2] Q[0,3]
 Q[1,0] Q[1,1] Q[1,2] Q[1,3]
 ```
 
- Therefore:
+ So:
 
 ```
 Q[0,0] → offset 0
@@ -1263,12 +1203,12 @@ Q[1,3] → offset 7
  [4,5,6,7]]
 ```
 
- The formula is:
+ The formula was:
 
  $$
 address(Q[m,d])
 =
-Q_{\text{base}}
+Q_{base}
 +
 m\times stride_{qm}
 +
@@ -1287,21 +1227,13 @@ $$
 0\times4+1\times1=1
 $$
 
- For Q\[1,0\]:
+ And so on.
 
- $$
-1\times4+0\times1=4
-$$
-
- For Q\[1,3\]:
-
- $$
-1\times4+3\times1=7
-$$
+ This gives us the memory offset for every $(row,column)$ pair.
 
 ---
 
- # 27\. Then `tl.load`
+ # 27\. Then tl.load
 
  You have:
 
@@ -1364,9 +1296,9 @@ q_mask = offs_m < N
 
  gives:
 
-```
-[True, False]
-```
+ $$
+[True,False]
+$$
 
  Then:
 
@@ -1385,7 +1317,7 @@ mask=q_mask[:,None]
 
 ---
 
- # 29\. `other=0.0`
+ # 29\. other=0.0
 
  For invalid positions:
 
@@ -1419,7 +1351,7 @@ k_ptrs = (
 \boxed{
 address(K[n,d])
 =
-K_{\text{base}}
+K_{base}
 +
 n\cdot stride_{kn}
 +
@@ -1460,7 +1392,7 @@ start_n = 14
  Then:
 
 ```
-offs_n = start_n + tl.arange(0, BLOCK_N)
+offs_n = start_n + tl.arange(0,BLOCK_N)
 ```
 
  gives:
@@ -1478,7 +1410,7 @@ offs_n = start_n + tl.arange(0, BLOCK_N)
 
 ---
 
- # 32\. `scores = tl.dot(q, tl.trans(k))`
+ # 32\. scores = tl.dot(q, tl.trans(k))
 
  Suppose:
 
@@ -1556,7 +1488,7 @@ $$
 
 ---
 
- # 34\. `tl.trans(k)`
+ # 34\. tl.trans(k)
 
  If:
 
@@ -1609,7 +1541,7 @@ scores.shape = [2,2]
 
 ---
 
- # 36\. `OUT`
+ # 36\. OUT
 
  You allocated:
 
@@ -1677,9 +1609,9 @@ out_ptrs = (
 
 ---
 
- # 38\. Important: `BLOCK_N` Is Not the Output Row Stride
+ # 38\. Important: Your Earlier BLOCK\_N Output Expression
 
- Suppose you had:
+ You had:
 
 ```
 OUT + offs_m[:, None] * BLOCK_N + offs_n[None, :]
@@ -1701,7 +1633,7 @@ $$
 OUT + offs_m[:, None] * N + offs_n[None, :]
 ```
 
- Or, even better in a general kernel, pass the actual output strides.
+ or, even better in a general kernel, pass the actual output strides.
 
 ---
 
@@ -1736,7 +1668,7 @@ $$
 
 ---
 
- # 40\. Why Use `-inf` for Invalid Scores?
+ # 40\. Why Use -inf for Invalid Scores?
 
  You showed:
 
@@ -1780,7 +1712,7 @@ after where:
 
 ---
 
- # 41\. Why `-inf` Instead of Zero?
+ # 41\. Why -inf Instead of Zero?
 
  Because you're going to calculate:
 
@@ -1814,7 +1746,9 @@ scores = [-3.0, invalid]
 \max(-3,0)=0
 $$
 
- Wrong.
+ Wrong!
+
+ The invalid position wins.
 
  But with:
 
@@ -1840,7 +1774,7 @@ $$
 
 ---
 
- # 42\. `tl.max(scores, axis=1)`
+ # 42\. tl.max(scores, axis=1)
 
  Suppose:
 
@@ -1936,7 +1870,7 @@ m_i
 
 ---
 
- # 44\. `tl.maximum`
+ # 44\. tl.maximum
 
  You have:
 
@@ -1968,15 +1902,13 @@ m_i = [4.1, 3.0]
 \max(2.8,4.1)=4.1
 $$
 
- and:
-
  $$
 \max(3.0,1.5)=3.0
 $$
 
 ---
 
- # 45\. `OUT_MAX`
+ # 45\. OUT\_MAX
 
  Suppose we eventually want one maximum per query row.
 
@@ -1997,17 +1929,16 @@ OUT_MAX.shape = (16,)
 ```
 OUT_MAX:
 
-Q0  → maximum
-Q1  → maximum
-Q2  → maximum
-Q3  → maximum
+Q0 → maximum
+Q1 → maximum
+Q2 → maximum
 ...
 Q15 → maximum
 ```
 
 ---
 
- # 46\. `out_ptrs = OUT_MAX + offs_m`
+ # 46\. out\_ptrs = OUT\_MAX + offs\_m
 
  Suppose:
 
@@ -2054,7 +1985,7 @@ OUT_MAX[5] = 4.5
 
 ---
 
- # 47\. Why No `[:,None]` for `OUT_MAX`?
+ # 47\. Why No \[:,None\] for OUT\_MAX?
 
  Because `OUT_MAX` is 1D.
 
@@ -2096,6 +2027,8 @@ OUT_MAX + m
 
  # 48\. Shape Summary
 
+ This is worth memorizing.
+
  Suppose:
 
 ```
@@ -2104,8 +2037,6 @@ D = 16
 BLOCK_M = 2
 BLOCK_N = 2
 ```
-
- Then:
 
  | Object | Shape |
 | --- | --- |
@@ -2170,7 +2101,7 @@ Q.stride() = (16,1)
 
 ```
 Q
-↓
+ ↓
 memory address
 ```
 
@@ -2218,7 +2149,7 @@ $$
 
 ---
 
- # 51\. `torch.rand`
+ # 51\. torch.rand
 
  You asked about:
 
@@ -2272,7 +2203,7 @@ Q = torch.rand((16,16))
 \text{number of rows}
 $$
 
- and the second `16` means:
+ and second `16` means:
 
  $$
 D=\text{features per row}
@@ -2358,7 +2289,7 @@ Load next K block
 Repeat
 ```
 
- The important thing is that the **entire $N\\times N$ score matrix doesn't need to live in GPU global memory**.
+ The important thing is that the **entire N×N score matrix doesn't need to live in GPU global memory**.
 
 ---
 
@@ -2377,9 +2308,7 @@ $$
  ## Tiled Attention
 
  $$
-S_{\text{tile}}
-=
-Q_{\text{block}}K_{\text{block}}^T
+S_{\text{tile}}=Q_{\text{block}}K_{\text{block}}^T
 $$
 
  and then toward:
@@ -2432,7 +2361,7 @@ $$
      scores      scores      scores
        │           │           │
        ▼           ▼           ▼
-      mask        mask        mask
+     mask        mask        mask
        │           │           │
        ▼           ▼           ▼
     max K0       max K1       max K2
@@ -2502,7 +2431,7 @@ tl.dot(q, tl.trans(k))
 Q_{\text{block}}K_{\text{block}}^T
 $$
 
- And:
+ and:
 
 ```
 tl.max(scores, axis=1)
@@ -2880,14 +2809,6 @@ $$
 
  ## Next Step
 
- The natural next step is to move from the **running maximum** to the full **online softmax update**, including:
+ The natural next step is to move from the **running maximum** to the full **online softmax update**, including the running normalization term and eventually the weighted accumulation with $V$.
 
- 1. The running normalization term.
-2. Rescaling the previous accumulator.
-3. Processing the weighted values from $V$.
-4. Maintaining the output accumulator.
-5. Understanding how FlashAttention avoids materializing the full attention matrix.
-
-```
-
-```
+````
