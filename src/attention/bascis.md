@@ -1045,17 +1045,11 @@ $$
 
  Mathematically:
 
- $$
-\boxed{
-address(Q[m,d])
+ address(Q[m,d])
 =
-Q_{\text{base}}
-+
-m\cdot stride_{qm}
-+
-d\cdot stride_{qd}
-}
-$$
+Q_base
++ m × stride_qm
++ d × stride_qd
 
 ---
 
