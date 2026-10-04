@@ -8,7 +8,10 @@ acp message:
     @echo "Files staged for commit:"
     git status --short
     @echo ""
-    git diff --cached --stat
-    @echo ""
     git commit -m "{{message}}"
     git push
+
+# Run the forward-pass test
+test:
+    uv run pytest tests/test_forward.py -s
+

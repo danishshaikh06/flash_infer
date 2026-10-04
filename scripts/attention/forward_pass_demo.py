@@ -2,6 +2,9 @@ import torch
 from flash_infer.attention.forward_pass import flash_attention_forward_kernel
 import triton 
 import math 
+from flash_infer.config import FlashAttentionConfig
+
+config = FlashAttentionConfig()
 
 def flash_attention(q,k,v):
     assert q.is_cuda
@@ -19,8 +22,8 @@ def flash_attention(q,k,v):
 
     N, D = q.shape 
 
-    BLOCK_M = 2
-    BLOCK_N = 16
+    BLOCK_M = config.block_m
+    BLOCK_N = config.block_n
 
     output = torch.empty_like(q)
 
