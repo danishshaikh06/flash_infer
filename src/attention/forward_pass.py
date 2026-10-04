@@ -100,7 +100,7 @@ def flash_attention_forward_kernel(
             tl.trans(k),
             input_precision = "ieee",
         )
-        scores*scale
+        scores = scores*scale
 
         # tl.where(condition, A, B)
         # For every element, if condition is True, choose A; otherwise choose B.
@@ -243,7 +243,9 @@ def reference_attention(q,k,v):
         dim=-1,
     )
 
-    return probs @ v
+    output = probs @ v
+
+    return output
 
 
 
