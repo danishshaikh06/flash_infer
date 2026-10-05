@@ -30,8 +30,8 @@
 
  The mathematical operation is:
 
- $$
-O = \operatorname{softmax}\left(\frac{QK^T}{\sqrt{D}}\right)V
+$$
+O = \mathrm{softmax}\left(\frac{QK^T}{\sqrt{D}}\right)V
 $$
 
  where:
@@ -237,13 +237,17 @@ $$
  The basic trade-off is:
 
  $$
-\boxed{\text{larger BLOCK\_M} \rightarrow \text{fewer programs and less overhead}}
+\text{larger BLOCK\_M}
+\rightarrow
+\text{fewer programs and less overhead}
 $$
 
  versus:
 
  $$
-\boxed{\text{larger BLOCK\_M} \rightarrow \text{larger per-program resource usage}}
+\text{larger BLOCK\_M}
+\rightarrow
+\text{larger per-program resource usage}
 $$
 
 ---
@@ -420,15 +424,20 @@ Increasing `BLOCK_N` therefore reduces the number of loop iterations.
 
 The trade-off is:
 
- $$
-\boxed{\text{larger BLOCK\_N} \rightarrow \text{fewer K/V loop iterations}}
+$$
+\text{larger BLOCK\_N}
+\rightarrow
+\text{fewer K/V loop iterations}
 $$
 
  versus:
 
  $$
-\boxed{\text{larger BLOCK\_N} \rightarrow \text{larger working set and resource usage}}
+\text{larger BLOCK\_N}
+\rightarrow
+\text{larger working set and resource usage}
 $$
+
 
 ---
 
@@ -828,25 +837,21 @@ or launch/loop overhead
 
  # 18\. Current conclusion
 
- The first tuning phase established the following:
+## 18. Current conclusion
 
- $$
-\boxed{\text{There is no universal best BLOCK\_M}}
-$$
+The first tuning phase established the following:
 
- $$
-\boxed{\text{BLOCK\_N=64 is a strong candidate at D=64, especially for larger N}}
-$$
+- **There is no universal best `BLOCK_M`.**
+- **`BLOCK_N=64` is a strong candidate at `D=64`, especially for larger `N`.**
+- **`BLOCK_N=128` is currently resource-infeasible.**
 
- $$
-\boxed{\text{BLOCK\_N=128 is currently resource-infeasible}}
-$$
+and the current profiling candidate is:
 
- and the current profiling candidate is:
-
- $$
-\boxed{N=1024,\ D=64,\ BLOCK_M=16,\ BLOCK_N=64}
-$$
+```text
+N        = 1024
+D        = 64
+BLOCK_M  = 16
+BLOCK_N  = 64
 
  The engineering process has therefore moved from:
 
