@@ -116,18 +116,18 @@ def run_case(N, D, config, results):
     triton_vs_naive = naive_ms / triton_ms
     triton_vs_sdpa = sdpa_ms / triton_ms
 
-    print(f" Naive PyTorch : {naive_ms:.4f} ms")
-    print(f" PyTorch SDPA  : {sdpa_ms:.4f} ms")
-    print(f" Triton        : {triton_ms:.4f} ms")
+    print(f"Naive PyTorch : {naive_ms:.2f} ms")
+    print(f"PyTorch SDPA  : {sdpa_ms:.2f} ms")
+    print(f"Triton : {triton_ms:.4f} ms")
 
     print(
         f"Triton vs Naive: "
-        f"{triton_vs_naive:.2f}x"
+        f"{triton_vs_naive:.4f}x"
     )
 
     print(
         f"Triton vs SDPA : "
-        f"{triton_vs_sdpa:.2f}x"
+        f"{triton_vs_sdpa:.4f}x"
     )
 
     results.append_csv([
@@ -170,24 +170,30 @@ def main():
 
     block_m_values = [2,4,8,16,32,64,128,]
     sequence_lengths = [64,128,256, 512,1024,]
+    D_values = [16, 32, 64]
 
-    for block_m in block_m_values:
+    for D in D_values:
+        print(f"\n{'=' * 60}")
+        print(f"D = {D}")
+        print(f"{'=' * 60}")
 
-        config = FlashAttentionConfig(
-            block_m=block_m,
-            block_n=16,
-        )
-        
-        print(f"\n========== BLOCK_M={block_m} ==========")
+        for block_m in block_m_values:
 
-        for N in sequence_lengths:
-
-            run_case(
-                N,
-                D,
-                config=config,
-                results=results,
+            config = FlashAttentionConfig(
+                block_m=block_m,
+                block_n=16,
             )
+            
+            print(f"\n========== BLOCK_M={block_m} ==========")
+
+            for N in sequence_lengths:
+
+                run_case(
+                    N,
+                    D,
+                    config=config,
+                    results=results,
+                )
 
 
 if __name__ == "__main__":
