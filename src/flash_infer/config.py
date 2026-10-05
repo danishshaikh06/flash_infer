@@ -2,5 +2,5 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FlashAttentionConfig:
-    block_m = 2
-    block_n = 16
+    block_m: int = 8
+    block_n: int = 16

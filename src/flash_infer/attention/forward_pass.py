@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 import math 
-
+from flash_infer.config import FlashAttentionConfig
 
 @triton.jit
 def flash_attention_forward_kernel(
@@ -181,3 +181,50 @@ def flash_attention_forward_kernel(
         #scores,
         #mask=q_mask[:, None] & k_mask[None, :],
     )
+
+def flash_attention(q,k,v,config: FlashAttentionConfig):
+    assert q.is_cuda
+    assert k.is_cuda
+    assert v.is_cuda
+
+    assert q.shape == k.shape
+    assert q.shape == v.shape 
+
+    assert q.ndim == 2
+
+    assert q.is_contiguous() 
+    assert k.is_contiguous() 
+    assert v.is_contiguous() 
+
+    N, D = q.shape 
+
+    BLOCK_M = config.block_m
+    BLOCK_N = config.block_n
+
+    output = torch.empty_like(q)
+
+    grid = (
+        triton.cdiv(N, BLOCK_M),
+    )
+
+    flash_attention_forward_kernel[grid](
+        q,
+        k,
+        v,
+        output,
+        q.stride(0),
+        q.stride(1),
+        k.stride(0),
+        k.stride(1),
+        v.stride(0),
+        v.stride(1),
+        output.stride(0),
+        output.stride(1),
+        N,
+        D=D,
+        BLOCK_M=BLOCK_M,
+        BLOCK_N=BLOCK_N,
+    )
+
+    return output
+
