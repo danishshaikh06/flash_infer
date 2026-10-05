@@ -169,8 +169,9 @@ def main():
     D = 16
 
     block_m_values = [2,4,8,16,32,64,128,]
+    block_n_values = [16, 32, 64,]
     sequence_lengths = [64,128,256, 512,1024,]
-    D_values = [16, 32, 64]
+    D_values = [16, 32, 64,]
 
     for D in D_values:
         print(f"\n{'=' * 60}")
