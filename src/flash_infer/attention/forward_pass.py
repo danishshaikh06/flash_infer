@@ -36,7 +36,7 @@ def flash_attention_forward_kernel(
 
     # Q: [BLOCK_M, D] -> Get the contiguous memory location 
     q_ptrs = (
-        Q # ex-> Q[0,0], [0,1]
+        Q # ex-> Q[0,0], [0,1] Here is the starting memory address where the Q tensor is stored.
         + offs_m[:, None] * stride_qm 
         + offs_d[None, :] * stride_qd
     )
