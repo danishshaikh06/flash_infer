@@ -35,6 +35,47 @@ def flash_attention_forward_kernel(
     q_mask = offs_m < N
 
     # Q: [BLOCK_M, D] -> Get the contiguous memory location 
+    '''
+    Imagine Q starts at memory address:
+    1000
+    
+    And Q contains:
+    Q =
+    [10 20 30 40
+     50 60 70 80]
+    
+    Assume each element takes one memory unit.
+    
+    Then:
+    
+    address: 1000 1001 1002 1003 1004 1005 1006 1007
+    value:      10   20   30   40   50   60   70   80
+    
+    Your offsets are:
+    
+    [0 1 2 3
+     4 5 6 7]
+    
+    So:
+    
+    q_ptrs = Q + offsets
+    
+    conceptually becomes:
+    
+    [1000 1001 1002 1003
+     1004 1005 1006 1007]
+    
+    These are addresses, not values.
+    
+    Then:
+    
+    tl.load(q_ptrs)
+    
+    means:
+    
+    Go to those addresses and load the values.
+    '''
+
     q_ptrs = (
         Q # ex-> Q[0,0], [0,1] Here is the starting memory address where the Q tensor is stored.
         + offs_m[:, None] * stride_qm 
