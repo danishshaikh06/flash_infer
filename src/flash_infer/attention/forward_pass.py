@@ -52,10 +52,11 @@ def flash_attention_forward_kernel(
     # Number of key positions processed in one block 
     offs_n = tl.arange(0,BLOCK_N)
     # Feature dimension
-    offs_d = tl.arange(0, D)
+    offs_d = tl.arange(0, BLOCK_D)
 
+    #boundary masking
     q_valid = offs_m < N
-    d_valid = offs_d < N 
+    d_valid = offs_d < D 
 
     # Q: [BLOCK_M, D] -> Get the contiguous memory location 
     '''
@@ -157,12 +158,11 @@ def flash_attention_forward_kernel(
         dtype = tl.float32,
     )
 
-    scale = 1.0 / math.sqrt(D)
-
     for start_n in tl.range(0, N, BLOCK_N):
 
         current_n = start_n + offs_n
 
+        # boundary masking
         k_valid = current_n < N
 
         # K: [BLOCK_N, D]
@@ -203,9 +203,9 @@ def flash_attention_forward_kernel(
             tl.trans(k),
             input_precision = "ieee",
         )
-        scores = scores * sm_scale
 
-        #causal mask 
+        scores = scores * sm_scale
+        
         score_mask = (
             q_valid[:,None] & k_valid[None,:]
         )
@@ -215,7 +215,7 @@ def flash_attention_forward_kernel(
             key_idx = current_n[None,:]
 
             score_mask = (
-                score_mask & (key_idx<=query_idx)
+                score_mask & (key_idx<=query_idx) # boundary + causal mask 
             )
 
         # tl.where(condition, A, B)
@@ -363,6 +363,7 @@ def flash_attention(
 
     output = torch.empty_like(q)
 
+    #Triton/GPU kernels often work efficiently with block sizes that are powers of 2
     block_d = triton.next_power_of_2(D)
 
     grid = (

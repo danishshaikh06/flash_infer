@@ -13,5 +13,5 @@ acp message:
 
 # Run the forward-pass test
 test:
-    uv run pytest tests/test_forward.py -s
+    uv run pytest tests/test2_forward.py -s
 
