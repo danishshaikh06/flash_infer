@@ -166,10 +166,9 @@ def main():
         "triton_vs_sdpa",
     ])
 
-    D = 16
+    #D = 16
 
     block_m_values = [2,4,8,16,32,64,128,]
-    block_n_values = [16, 32, 64,]
     sequence_lengths = [64,128,256, 512,1024,]
     D_values = [16, 32, 64,]
 
