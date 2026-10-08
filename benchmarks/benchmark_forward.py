@@ -204,11 +204,11 @@ def main():
 
     config = FlashAttentionConfig(
         block_m=16,
-        block_n=64,
+        block_n=128,
     )
 
     results = BenchmarkResults(
-        "forward_benchmark"
+        "forward_benchmark4"
     )
 
     results.create_csv([
