@@ -174,21 +174,15 @@ $$
 
 Dot products:
 
-$$
-QK^T
-=
-[1,0] dot [1,0]
-=1
-$$
+```
+QK^T = [1,0] . [1,0] = 1
+```
 
 and:
 
-$$
-QK^T
-=
-[1,0] dot [0,1]
-=0
-$$
+```
+QK^T = [1,0] . [1,0] = 1
+```
 
 So:
 
@@ -433,17 +427,11 @@ V=
 $$
 
 Therefore:
-`PV`
-$$
 
-PV
-=
-[1,0]
-
-10 0
-0 20
-
-$$
+```
+pv = [1,0] dot [10,0,
+                0,20] 
+```
 
 $$
 =[10,0]
@@ -691,14 +679,9 @@ $$
 
 Then:
 
-$$
-
-l_new
-=
-alplha *  l_old
-+
-e^{score-new_max}
-$$
+```
+l_new = alpha * l_old + exp(score-new_max)
+```
 
 This is what allows the kernel to process attention **block by block** while still getting the same result as a normal softmax.
 
