@@ -37,9 +37,6 @@ grid = (8,)
 
 Note: One program is responsible for one Q tile, and it loops over all 8 K tiles.
 
-
-### Progress covered so far: Q/K tiling → Triton programs → pointer arithmetic → strides → score tiles → masking → running maximum
-
 ---
 
 This code is implementing **attention with online softmax**, so the easiest way to understand it is to use a _very tiny_ example and follow one query row through two key blocks.
@@ -90,7 +87,7 @@ We'll calculate attention for **Query 0** first.
 
 # 1\. First iteration: `start_n = 0`
 
-Your loop:
+loop:
 
 ```
 for start_n in tl.range(0, N, BLOCK_N):
@@ -178,18 +175,18 @@ $$
 Dot products:
 
 $$
-Q_0K_0^T
+QK^T
 =
-[1,0]\cdot[1,0]
+[1,0] dot [1,0]
 =1
 $$
 
 and:
 
 $$
-Q_0K_1^T
+QK^T
 =
-[1,0]\cdot[0,1]
+[1,0] dot [0,1]
 =0
 $$
 
@@ -199,7 +196,7 @@ $$
 scores=[1,0]
 $$
 
-Your code does exactly this:
+code does exactly this:
 
 ```
 scores = tl.dot(q, tl.trans(k))
@@ -253,7 +250,7 @@ score mask:
 [True, False]
 ```
 
-Your code changes:
+code changes:
 
 ```
 [1, 0]
@@ -347,7 +344,7 @@ $$
 
 # 7\. Calculate `p`
 
-Your code:
+code:
 
 ```
 p = tl.exp(scores - new_m[:, None])
@@ -436,15 +433,16 @@ V=
 $$
 
 Therefore:
-
+`PV`
 $$
+
 PV
 =
 [1,0]
-\begin{bmatrix}
-10&0\\
-0&20
-\end{bmatrix}
+
+10 0
+0 20
+
 $$
 
 $$
@@ -566,7 +564,7 @@ $$
 
 # 12\. Final normalization
 
-Your code:
+code:
 
 ```
 acc = acc / safe_l[:, None]
@@ -694,20 +692,19 @@ $$
 Then:
 
 $$
-l_{new}
+
+l_new
 =
-\alpha l_{old}
+alplha *  l_old
 +
-\sum e^{score-new\_max}
+e^{score-new_max}
 $$
 
 This is what allows the kernel to process attention **block by block** while still getting the same result as a normal softmax.
 
 ---
 
-# Your whole code in plain English
-
-Your code is basically doing this:
+code is basically doing this:
 
 ```
 For every block of K/V:
