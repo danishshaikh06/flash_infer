@@ -1,22 +1,11 @@
 # FlashAttention — Detailed Notes
 
-                    Triton                    CUDA
-
-Program instance    program                   thread block
-                    ↓                         ↓
-                    pid                       blockIdx.x
-
-Q tile              BLOCK_M rows              block's data tile
-
-K tile              BLOCK_N rows              processed inside loop
-
-grid=(8,)            8 programs                <<<8, ...>>>
-
 grid = (1,)
 
 1 PROGRAM
     │
     └── Q block 0
+
           │
           ├── K block 0
           ├── K block 1
@@ -32,12 +21,19 @@ grid = (8,)
 8 PROGRAMS
     │
     ├── Program 0 → Q0 → K0 K1 K2 ... K7
+
     ├── Program 1 → Q1 → K0 K1 K2 ... K7
+
     ├── Program 2 → Q2 → K0 K1 K2 ... K7
+
     ├── Program 3 → Q3 → K0 K1 K2 ... K7
+
     ├── Program 4 → Q4 → K0 K1 K2 ... K7
+
     ├── Program 5 → Q5 → K0 K1 K2 ... K7
+
     ├── Program 6 → Q6 → K0 K1 K2 ... K7
+    
     └── Program 7 → Q7 → K0 K1 K2 ... K7
 
 Note: One program is responsible for one Q tile, and it loops over all 8 K tiles.
