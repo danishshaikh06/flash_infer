@@ -1,12 +1,10 @@
-import math
-
 import torch
-import torch.nn.functional as F
 
 from common.result import BenchmarkResults
 
 from flash_infer.attention.forward_pass import flash_attention
 from flash_infer.config import FlashAttentionConfig
+from triton.runtime.errors import OutOfResources
 
 
 DEVICE = "cuda"
@@ -15,36 +13,6 @@ DTYPE = torch.float32
 WARMUP = 50
 ITERATIONS = 200
 REPEATS = 5
-
-
-def naive_attention(q, k, v):
-    scale = 1.0 / math.sqrt(q.shape[-1])
-
-    scores = torch.matmul(
-        q,
-        k.transpose(-2, -1),
-    )
-
-    scores = scores * scale
-
-    probs = torch.softmax(
-        scores,
-        dim=-1,
-    )
-
-    return torch.matmul(
-        probs,
-        v,
-    )
-
-
-def sdpa_attention(q, k, v, causal):
-    return F.scaled_dot_product_attention(
-        q,
-        k,
-        v,
-        is_causal=causal,
-    )
 
 
 def benchmark_fn(fn, *args):
@@ -57,11 +25,11 @@ def benchmark_fn(fn, *args):
 
     for _ in range(REPEATS):
         start = torch.cuda.Event(
-            enable_timing=True,
+            enable_timing=True
         )
 
         end = torch.cuda.Event(
-            enable_timing=True,
+            enable_timing=True
         )
 
         start.record()
@@ -92,15 +60,6 @@ def run_case(
     config,
     results,
 ):
-    print(
-        f"\n"
-        f"B={B}, "
-        f"H={H}, "
-        f"N={N}, "
-        f"D={D}, "
-        f"causal={causal}"
-    )
-
     q = torch.randn(
         B,
         H,
@@ -113,61 +72,52 @@ def run_case(
     k = torch.randn_like(q)
     v = torch.randn_like(q)
 
-    naive_ms = benchmark_fn(
-        naive_attention,
-        q,
-        k,
-        v,
-    )
+    try:
+        triton_ms = benchmark_fn(
+            flash_attention,
+            q,
+            k,
+            v,
+            config,
+            causal,
+        )
 
-    sdpa_ms = benchmark_fn(
-        sdpa_attention,
-        q,
-        k,
-        v,
-        causal,
-    )
+    except OutOfResources as exc:
+        print(
+        f"SKIPPED: BM={config.block_m}, "
+        f"BN={config.block_n}, "
+        f"warps={config.num_warps}, "
+        f"stages={config.num_stages} "
+        f"exceeded GPU resources: {exc}"
+        )   
 
-    triton_ms = benchmark_fn(
-        flash_attention,
-        q,
-        k,
-        v,
-        config,
-        causal,
-    )
-
-    triton_vs_naive = (
-        naive_ms / triton_ms
-    )
-
-    triton_vs_sdpa = (
-        sdpa_ms / triton_ms
-    )
-
-    print(
-        f"Naive PyTorch : "
-        f"{naive_ms:.4f} ms"
-    )
+        results.append_csv([
+            torch.cuda.get_device_name(0),
+            B,
+            H,
+            N,
+            D,
+            causal,
+            config.block_m,
+            config.block_n,
+            config.num_warps,
+            config.num_stages,
+            None,
+            "skipped",
+        ])
+        return 
 
     print(
-        f"PyTorch SDPA  : "
-        f"{sdpa_ms:.4f} ms"
-    )
-
-    print(
-        f"Triton        : "
-        f"{triton_ms:.4f} ms"
-    )
-
-    print(
-        f"Triton vs Naive: "
-        f"{triton_vs_naive:.4f}x"
-    )
-
-    print(
-        f"Triton vs SDPA : "
-        f"{triton_vs_sdpa:.4f}x"
+        f"B={B}, "
+        f"H={H}, "
+        f"N={N}, "
+        f"D={D}, "
+        f"causal={causal}, "
+        f"BM={config.block_m}, "
+        f"BN={config.block_n}, "
+        f"warps={config.num_warps}, "
+        f"stages={config.num_stages}, "
+        f"triton={triton_ms:.4f} ms"
     )
 
     results.append_csv([
@@ -179,36 +129,25 @@ def run_case(
         causal,
         config.block_m,
         config.block_n,
-        naive_ms,
-        sdpa_ms,
+        config.num_warps,
+        config.num_stages,
         triton_ms,
-        triton_vs_naive,
-        triton_vs_sdpa,
+        'ok',
     ])
 
 
 def main():
     print(
-        "FlashInfer forward attention benchmark"
+        "FlashInfer kernel configuration sweep"
     )
 
     print(
-        f"Device: "
+        f"GPU: "
         f"{torch.cuda.get_device_name(0)}"
     )
 
-    print(
-        f"PyTorch: "
-        f"{torch.__version__}"
-    )
-
-    config = FlashAttentionConfig(
-        block_m=16,
-        block_n=128,
-    )
-
     results = BenchmarkResults(
-        "forward_benchmark4"
+        "kernel_config_sweep"
     )
 
     results.create_csv([
@@ -220,23 +159,26 @@ def main():
         "causal",
         "block_m",
         "block_n",
-        "naive_ms",
-        "sdpa_ms",
+        "num_warps",
+        "num_stages",
         "triton_ms",
-        "triton_vs_naive",
-        "triton_vs_sdpa",
+        'status',
     ])
 
-    cases = [
-        (1, 1, 128, 64),
-        (1, 8, 512, 64),
-        (1, 16, 1024, 64),
-        (2, 8, 1024, 64),
-    ]
+    B = 1
+    H = 16
+    N = 1024
+    D = 64
+
+    block_m_values = [16, 32]
+    block_n_values = [32, 64]
+    num_warps_values = [2, 4, 8]
+    num_stages_values = [2, 3, 4]
 
     for causal in [False, True]:
+
         print(
-            f"\n{'=' * 60}"
+            f"\n{'=' * 70}"
         )
 
         print(
@@ -244,19 +186,30 @@ def main():
         )
 
         print(
-            f"{'=' * 60}"
+            f"{'=' * 70}"
         )
 
-        for B, H, N, D in cases:
-            run_case(
-                B,
-                H,
-                N,
-                D,
-                causal,
-                config,
-                results,
-            )
+        for block_m in block_m_values:
+            for block_n in block_n_values:
+                for num_warps in num_warps_values:
+                    for num_stages in num_stages_values:
+
+                        config = FlashAttentionConfig(
+                            block_m=block_m,
+                            block_n=block_n,
+                            num_warps=num_warps,
+                            num_stages=num_stages,
+                        )
+
+                        run_case(
+                            B,
+                            H,
+                            N,
+                            D,
+                            causal,
+                            config,
+                            results,
+                        )
 
 
 if __name__ == "__main__":

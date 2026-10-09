@@ -403,6 +403,8 @@ def flash_attention(
         BLOCK_M=config.block_m,
         BLOCK_N=config.block_n,
         BLOCK_D=block_d,
+        num_warps = config.num_warps,
+        num_stages = config.num_stages,
     )
 
     return output
