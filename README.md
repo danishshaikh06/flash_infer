@@ -1,64 +1,118 @@
 # FlashInfer
 
-**An experimental, memory-efficient FlashAttention forward kernel built with Triton for NVIDIA GPUs.**
+**A Triton implementation of exact, memory-efficient scaled dot-product attention on NVIDIA GPUs.**
 
-FlashInfer implements exact scaled dot-product self-attention with tiled query/key/value processing, numerically stable online softmax, and fused output accumulation. The engineering focus is on correctness, systematic parameter tuning, and GPU profiling rather than unverified peak-performance claims.
+FlashInfer is an experimental GPU kernel-engineering project focused on implementing, validating, and optimizing FlashAttention-style computation from first principles. It combines **tiled attention**, **numerically stable online softmax**, **multi-head execution**, **controlled CUDA benchmarks**, and **Nsight Compute profiling**.
 
-**Status:** Batched, multi-head, causal and non-causal forward attention implemented and tested on FP32 workloads. Forward optimization is in progress. Backward support is planned.
+> **Project status — Forward v1 implemented.** Batched, multi-head, causal and non-causal self-attention has passed the documented FP32 correctness tests. Hardware-guided forward optimization is in progress; the backward pass is not yet implemented.
+>
+> This is an independent research and learning project, not a production-ready replacement for PyTorch SDPA or an affiliation with the separately maintained FlashInfer library.
 
-> This is an independent educational and performance-engineering project, not a production-ready replacement for PyTorch SDPA or an affiliation with the separate FlashInfer library.
+## At a glance
 
-## Overview
-
-| Capability | Current status |
+| Area | Implementation / result |
 | --- | --- |
-| Inputs and outputs | `[B, H, N, D]` self-attention |
-| Causal and bidirectional attention | Implemented and validated on FP32 test cases |
-| Algorithm | Tiled `QKᵀ`, online softmax, fused `PV`, final normalization |
-| Numerical method | FP32 intermediate accumulation |
-| Tensor indexing | Explicit per-tensor strides and boundary masking |
-| Tuning parameters | `BLOCK_M`, `BLOCK_N`, `num_warps`, `num_stages` |
-| Testing | PyTorch `scaled_dot_product_attention` as reference |
-| Profiling | Nsight Compute: resource usage, occupancy, throughput |
-| Backward / autograd | Not implemented |
+| Operation | Exact scaled dot-product **self-attention** |
+| Tensor interface | `Q, K, V, O: [batch, heads, sequence, head_dim]` |
+| Attention modes | Causal and non-causal |
+| GPU kernel | Python + [Triton](https://triton-lang.org/) |
+| Numerical method | Online softmax; FP32 intermediate accumulation |
+| Memory strategy | Tiled Q/K/V processing; no materialized full `N × N` score matrix |
+| Launch configuration | `BLOCK_M`, `BLOCK_N`, `num_warps`, `num_stages` |
+| Correctness | Eight reported FP32 cases; **maximum absolute error: 1.67 × 10⁻⁶** |
+| Benchmark hardware | NVIDIA GeForce RTX 4070 Laptop GPU (SM 8.9) |
+| Best measured launch candidate* | `BLOCK_M=32`, `BLOCK_N=64`, `num_warps=4`, `num_stages=2` |
+| Profiling | CUDA events and NVIDIA Nsight Compute |
 
-## Why tiled attention?
+*Best among the tested configurations for `(B,H,N,D)=(1,16,1024,64)` in the recorded sweep—not a universal optimum.
 
-Scaled dot-product attention is
+## Motivation
 
-$$
-O = \operatorname{softmax}\left(\frac{QK^\top}{\sqrt{D}}\right)V.
-$$
-
-Conventional implementations can materialize the intermediate score matrix with shape `[B, H, N, N]`. At `(B,H,N,D)=(1,16,1024,64)`, a single FP32 score matrix occupies **64 MiB**:
+Scaled dot-product attention computes
 
 $$
-1 \times 16 \times 1024^2 \times 4\ \mathrm{bytes} = 64\ \mathrm{MiB}.
+O = \operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{D}}\right)V.
 $$
 
-This implementation avoids materializing the complete score tensor by processing query tiles of `BLOCK_M` rows against successive key/value tiles of `BLOCK_N` rows. Dense exact attention still has quadratic arithmetic complexity in sequence length; the design primarily targets intermediate storage and memory traffic.
+A straightforward implementation may materialize the intermediate score tensor with shape `[B,H,N,N]`. With `B=1`, `H=16`, `N=1024`, and FP32 scores, that tensor alone requires
 
-### Online-softmax update
+$$
+1 \times 16 \times 1024^2 \times 4\;\text{bytes} = 64\;\text{MiB}.
+$$
 
-For each query row, the kernel maintains a running maximum $m$, exponential sum $\ell$, and unnormalized output accumulator $a$. For a new score tile $S$:
+FlashInfer processes attention in tiles and maintains the sufficient statistics needed to calculate the same softmax output without storing the full attention matrix in GPU global memory. This reduces intermediate storage and memory traffic. **Dense exact attention still performs quadratic work with respect to sequence length**; the objective is a more efficient implementation of that computation, not a change in its mathematical complexity.
+
+## Kernel architecture
+
+### Tiled execution
+
+Each Triton program handles `BLOCK_M` query rows for one `(batch, head)` pair. It walks through the sequence in key/value tiles of `BLOCK_N` rows:
+
+```text
+                    One batch/head pair
+Q [N,D] → [BLOCK_M,D] ─────┬──── K/V tile 0 [BLOCK_N,D]
+                          ├──── K/V tile 1 [BLOCK_N,D]
+                          ├──── ...
+                          └──── K/V tile J [BLOCK_N,D]
+                                   ↓
+                         Online-softmax update
+                                   ↓
+                          Output [BLOCK_M,D]
+```
+
+The GPU launch grid is:
+
+```python
+grid = (triton.cdiv(N, config.block_m), B * H)
+```
+
+For `B=1`, `H=16`, `N=1024`, and `BLOCK_M=32`, the launch contains `32 × 16 = 512` Triton programs. The programs independently process their assigned query tiles and heads.
+
+### Numerically stable online softmax
+
+For each query row, the kernel maintains three quantities:
+
+- **`m`**: the largest attention score encountered so far;
+- **`l`**: the running exponential sum relative to that maximum;
+- **`acc`**: the unnormalized, weighted sum of value vectors.
+
+Given a new score tile `S = Q_tile @ K_tile.T / sqrt(D)`, the recurrence is
 
 $$
 \begin{aligned}
-m' &= \max(m,\operatorname{rowmax}(S)), \\
-\alpha &= \exp(m-m'), \\
-P &= \exp(S-m'), \\
-\ell' &= \alpha\ell + \operatorname{rowsum}(P), \\
-a' &= \alpha a + PV.
+m' &= \max\left(m,\operatorname{rowmax}(S)\right),\\
+\alpha &= \exp(m-m'),\\
+P &= \exp(S-m'),\\
+l' &= \alpha l + \operatorname{rowsum}(P),\\
+acc' &= \alpha\,acc + PV.
 \end{aligned}
 $$
 
-The final result is $O=a/\ell$. Boundary and causal masks exclude invalid scores. Each program handles one query tile for one batch/head pair; the grid is `(ceil(N/BLOCK_M), B*H)`.
+After all K/V tiles have been processed:
 
-**Small example:** With `B=1, H=2, N=128, BLOCK_M=32`, each head requires four query-tile programs, giving eight programs in total. Each program iterates over key/value tiles without sharing softmax state across heads.
+$$
+\boxed{O=\frac{acc}{l}}
+$$
 
-## Installation and usage
+Rescaling by `α` preserves the contributions of previously processed tiles when a later tile contains a larger score. Normalization happens **once, after the tile loop**. Invalid key positions and future-token positions are masked before contributing to the softmax.
 
-Prerequisites: Python 3.11+, a CUDA-capable NVIDIA GPU, a working CUDA-enabled PyTorch installation, and Triton. Exact package constraints are defined in [`pyproject.toml`](pyproject.toml) and [`uv.lock`](uv.lock).
+**Illustrative example.** Suppose the first tile has scores `[1,2]`, so `m=2` and `l=exp(-1)+1`. If the next tile contains `[5,3]`, the new maximum is `5`; the old exponential sum must be rescaled by `exp(2−5)=exp(-3)` before adding the new contributions. This is the essential reason the full score matrix is unnecessary.
+
+### Tensor layout and supported behavior
+
+The forward wrapper accepts identically shaped CUDA tensors `Q`, `K`, and `V` in `[B,H,N,D]` format. It supports:
+
+- Causal masking (`key_position ≤ query_position`) and non-causal attention.
+- Batch/head indexing through a two-dimensional Triton launch grid.
+- Explicit tensor strides for Q/K/V and output addressing.
+- Partial query/key tiles and padded feature lanes, using masked loads and stores.
+- FP32, FP16, and BF16 inputs at the API level; the kernel converts operands to FP32 for its dot-product computation and uses FP32 softmax/accumulation state.
+
+**Validated scope:** the published numerical tests cover **FP32** with head dimensions `16` and `64`. FP16/BF16 accuracy, arbitrary non-contiguous layouts, large head dimensions, and additional numerical edge cases still require dedicated validation. This implementation currently targets same-length self-attention; it does not implement GQA/MQA, KV-cache decoding, paged attention, dropout, variable-length packed sequences, or backward gradients.
+
+## Installation
+
+**Requirements:** Linux or WSL with an NVIDIA CUDA-capable GPU and compatible drivers, Python 3.11+, [uv](https://docs.astral.sh/uv/), and the dependencies declared in [`pyproject.toml`](pyproject.toml). The measurements below were obtained using PyTorch `2.13.0+cu130` and the RTX 4070 Laptop GPU.
 
 ```bash
 git clone https://github.com/danishshaikh06/flash_infer.git
@@ -66,6 +120,8 @@ cd flash_infer
 uv sync
 uv run pytest tests/test2_forward.py -s
 ```
+
+### Quick start
 
 ```python
 import torch
@@ -83,139 +139,179 @@ config = FlashAttentionConfig(
     num_stages=2,
 )
 
-output = flash_attention(q, k, v, config, causal=True)
+output = flash_attention(q, k, v, config=config, causal=True)
 assert output.shape == q.shape
 ```
 
-The sample configuration is the best observed *among a specific measured sweep*; it is not a universal optimum. The current interface requires Q, K, V to have identical four-dimensional shapes and matching dtype/device. FP16 and BF16 are accepted by the wrapper, but their numerical/performance behavior is not yet validated by the documented test suite.
+The configuration shown is a measured candidate for one FP32 workload. Different input shapes, dtypes, and GPU architectures may favor other settings or exceed hardware resource limits.
 
-## Correctness results
+## Numerical correctness
 
-The generalized forward kernel was evaluated against PyTorch `torch.nn.functional.scaled_dot_product_attention` using FP32 tensors, `atol=2e-3`, and `rtol=2e-3`. All eight listed cases passed.
+The generalized forward kernel was compared against PyTorch's [`scaled_dot_product_attention`](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html), using random FP32 inputs and `torch.testing.assert_close(atol=2e-3, rtol=2e-3)`.
 
-| Shape `(B,H,N,D)` | Non-causal max error | Causal max error |
+| Tensor shape `(B,H,N,D)` | Non-causal max. abs. error | Causal max. abs. error |
 | --- | ---: | ---: |
-| `(1,1,4,16)` | 3.9e-7 | 3.9e-7 |
-| `(1,2,17,16)` | 4.8e-7 | 7.2e-7 |
-| `(2,2,33,64)` | 1.31e-6 | 1.07e-6 |
-| `(2,4,64,64)` | **1.67e-6** | 1.55e-6 |
+| `(1,1,4,16)` | 3.9 × 10⁻⁷ | 3.9 × 10⁻⁷ |
+| `(1,2,17,16)` | 4.8 × 10⁻⁷ | 7.2 × 10⁻⁷ |
+| `(2,2,33,64)` | 1.31 × 10⁻⁶ | 1.07 × 10⁻⁶ |
+| `(2,4,64,64)` | **1.67 × 10⁻⁶** | 1.55 × 10⁻⁶ |
 
-The largest observed absolute error was **1.67e-6**. Non-multiple lengths (`N=17`, `N=33`) exercise partial-tile masking. These results validate the listed FP32 cases, **not** arbitrary strides, all supported dtypes, every sequence length, or backward gradients. See [`tests/test2_forward.py`](tests/test2_forward.py).
+All eight reported cases passed. Irregular lengths such as `N=17` and `N=33` exercise boundary masks. **These results demonstrate correctness for the documented FP32 inputs only**; the currently committed generalized tests do not cover all supported precision modes, non-contiguous strides, or long multi-tile sequences.
+
+Test source: [`tests/test2_forward.py`](tests/test2_forward.py).
 
 ## Benchmark methodology
 
-**Environment:** NVIDIA GeForce RTX 4070 Laptop GPU (compute capability 8.9), WSL/Linux, Python 3.11, PyTorch `2.13.0+cu130`, FP32. The generalized benchmarking scripts use CUDA events after warmup, with 200 timed iterations per repetition and the median of five repetitions. Timings include Python wrapper/launch activity within the timed loop, not just device-kernel execution.
+| Property | Recorded setup |
+| --- | --- |
+| GPU | NVIDIA GeForce RTX 4070 Laptop GPU |
+| Compute capability | 8.9 |
+| Software environment | WSL/Linux, Python 3.11, PyTorch `2.13.0+cu130` |
+| Input dtype | FP32 |
+| Reference implementation | PyTorch scaled dot-product attention (SDPA) |
+| Timing | CUDA events; 50 warmup calls; 200 timed operations per repetition; median of five repetitions |
+| Configuration-sweep workload | `B=1, H=16, N=1024, D=64` |
 
-**Interpretation:** `SDPA / Triton > 1` means the custom implementation is faster; a ratio below 1 means SDPA is faster. Values depend on input shape, dtype, backend selection, power/clock state, and measurement conditions. No blanket SDPA speedup is claimed.
+CUDA events measure elapsed time on the **GPU timeline**, not direct Python CPU execution time. Repeated host-side dispatch can nevertheless create gaps between GPU operations, affecting the measured interval. Future benchmark work will use CUDA Graph replay and explicitly document the selected SDPA backend to better isolate device execution latency.
 
-### Generalized forward versus PyTorch SDPA
+All latency values below are **milliseconds**. The comparison ratio is **`SDPA latency / Triton latency`**; a value below `1.0×` means **PyTorch SDPA is faster**. Performance varies with workload, dtype, backend, compilation settings, and hardware operating conditions.
 
-Recorded results for `BLOCK_M=32`, `BLOCK_N=64` (milliseconds), from [`forward_benchmark_with_naive_sdpa.csv`](benchmarks/results/forward_benchmark_with_naive_sdpa.csv):
+### Generalized forward: Triton versus PyTorch
 
-**Non-causal**
+These numbers come from [`benchmarks/results/forward_benchmark_with_naive_sdpa.csv`](benchmarks/results/forward_benchmark_with_naive_sdpa.csv), using `BLOCK_M=32`, `BLOCK_N=64`, four warps, and two stages.
 
-| Shape `(B,H,N,D)` | Naive PyTorch | SDPA | Triton | SDPA / Triton |
+**Non-causal attention**
+
+| `(B,H,N,D)` | Naive PyTorch | SDPA | Triton | SDPA / Triton |
 | --- | ---: | ---: | ---: | ---: |
 | `(1,1,128,64)` | 0.1428 | 0.0268 | 0.1364 | 0.20× |
 | `(1,8,512,64)` | 0.1263 | 0.1281 | 0.1529 | 0.84× |
 | `(1,16,1024,64)` | 1.8763 | 0.8578 | **1.1115** | 0.77× |
 | `(2,8,1024,64)` | 1.8758 | 0.8558 | 1.1115 | 0.77× |
 
-**Causal**
+**Causal attention**
 
-| Shape `(B,H,N,D)` | SDPA | Triton | SDPA / Triton |
+| `(B,H,N,D)` | SDPA | Triton | SDPA / Triton |
 | --- | ---: | ---: | ---: |
 | `(1,1,128,64)` | 0.0244 | 0.0479 | 0.51× |
 | `(1,8,512,64)` | 0.0939 | 0.1573 | 0.60× |
 | `(1,16,1024,64)` | 0.4880 | **1.1432** | 0.43× |
 | `(2,8,1024,64)` | 0.4880 | 1.1434 | 0.43× |
 
-**Important:** The historical naive PyTorch implementation did **not** apply a causal mask. Naive values from causal-labeled runs are consequently not valid causal baselines and are not shown in the causal table.
+The historical naive-attention reference did not implement causal masking, so it is intentionally **not** presented as a causal baseline.
 
-**Current outcome:** the forward kernel is numerically validated but remains slower than optimized PyTorch SDPA on these representative batched/multi-head measurements, especially for causal attention.
+**Result:** The generalized forward kernel is functionally validated on the reported cases but remains **slower than optimized PyTorch SDPA** on these representative FP32 workloads. No universal SDPA speedup is claimed.
 
-### Prototype query and key/value tile sweeps
+### Historical tile sweeps
 
-The earlier two-dimensional `[N,D]` prototype was used to isolate tile tradeoffs. Those findings are historical and should **not** be mixed with generalized `[B,H,N,D]` results.
+An earlier two-dimensional `[N,D]` prototype was used to study how tile geometry affects performance. These experiments preceded the generalized `[B,H,N,D]` API and must **not** be compared directly with its results.
 
-| Experiment | Tile change | Recorded latency | Relative improvement |
+| Experiment | Change | Observed latency | Within-experiment improvement |
 | --- | --- | --- | ---: |
-| `N=1024, D=32, BLOCK_N=16` | `BLOCK_M: 2 → 16` | 0.5015 → 0.0793 ms | ~6.3× |
-| `N=1024, D=64, BLOCK_M=16` | `BLOCK_N: 16 → 64` | 0.1374 → 0.0863 ms | ~1.59× |
+| `N=1024, D=32, BLOCK_N=16` | `BLOCK_M: 2 → 16` | `0.5015 → 0.0793 ms` | ~6.3× |
+| `N=1024, D=64, BLOCK_M=16` | `BLOCK_N: 16 → 64` | `0.1374 → 0.0863 ms` | ~1.59× |
 
-Larger tiles reduced loop/program overhead but increased working-set and hardware-resource requirements. With `BLOCK_M=16, BLOCK_N=128, D=64`, compilation failed because **143,424 bytes of shared memory were required**, exceeding the **101,376-byte** reported limit. Detailed historical notes: [`block_tuning.md`](benchmarks/results/block_tuning.md).
+Increasing tile dimensions can reduce loop iterations but raises resource demands. In the prototype, `BLOCK_M=16, BLOCK_N=128, D=64` exceeded the shared-memory limit: **143,424 bytes requested versus 101,376 bytes available**.
 
-### Launch-configuration sweep
+Detailed experimental record: [`benchmarks/results/block_tuning.md`](benchmarks/results/block_tuning.md).
 
-The generalized kernel was tuned for `(B,H,N,D)=(1,16,1024,64)` across **72** combinations:
+### Generalized launch-configuration sweep
 
-- `BLOCK_M ∈ {16, 32}` and `BLOCK_N ∈ {32, 64}`
-- `num_warps ∈ {2, 4, 8}` and `num_stages ∈ {2, 3, 4}`
-- both causal modes
+The next experiment evaluated **72 combinations** of:
 
-**60 configurations succeeded and 12 were skipped** due to resource limits. The fastest observed configuration in *both* modes was:
+- `BLOCK_M ∈ {16,32}`, `BLOCK_N ∈ {32,64}`;
+- `num_warps ∈ {2,4,8}`, `num_stages ∈ {2,3,4}`;
+- `causal ∈ {False,True}`.
 
-| Mode | `BLOCK_M` | `BLOCK_N` | Warps | Stages | Median latency |
+Of those configurations, **60 completed** and **12 were skipped** because their shared-memory requirements exceeded the GPU's limit. The fastest observed settings for the tested shape `(1,16,1024,64)` were identical in both modes:
+
+| Attention mode | `BLOCK_M` | `BLOCK_N` | Warps | Stages | Median latency |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | Non-causal | **32** | **64** | **4** | **2** | **1.1111 ms** |
 | Causal | **32** | **64** | **4** | **2** | **1.1434 ms** |
 
-Notable observations: higher pipeline stage counts generally did not improve latency; eight warps were often slower; and the two-warp version of `BLOCK_M=32, BLOCK_N=64, num_stages=2` measured **8.2309 ms**, over 7× slower than the four-warp variant. The cause of that anomaly is **not yet established**. Several four-stage configurations exceeded the per-block shared-memory limit (one required **106,496 bytes** against a **101,376-byte** limit).
+Important observations: larger stage counts generally did not help; eight warps were frequently slower; and a two-warp version of `BLOCK_M=32, BLOCK_N=64, num_stages=2` measured **8.2309 ms**, compared with **1.1111 ms** for four warps in non-causal mode. The root cause of this regression has **not** yet been demonstrated. Several four-stage configurations were resource-infeasible, including one requiring **106,496 bytes** against a **101,376-byte** reported launch limit.
 
-Full results: [`kernel_config_sweep.csv`](benchmarks/results/kernel_config_sweep.csv). The winning configuration is workload-specific, not globally optimal.
+Full experimental dataset: [`benchmarks/results/kernel_config_sweep.csv`](benchmarks/results/kernel_config_sweep.csv).
 
-## Nsight Compute: initial kernel profile
+## GPU profiling: Nsight Compute
 
-Non-causal attention, `B=1, H=16, N=1024, D=64`, `BLOCK_M=32`, `BLOCK_N=64`, `num_warps=4`, `num_stages=2`:
+A first non-causal hardware profile was collected for `(B,H,N,D)=(1,16,1024,64)` with `BLOCK_M=32`, `BLOCK_N=64`, four warps and two stages. The recorded report is available as [`profile_forward_noncausal.ncu-rep`](profile_forward_noncausal.ncu-rep).
 
-| Hardware metric | Measured value |
+| Metric | Observed value |
 | --- | ---: |
 | Grid / CUDA block | `(32,16,1)` / 128 threads |
-| Register allocation | **255 registers/thread** |
-| Dynamic shared memory | **49.15 KiB/block** |
-| Driver shared memory | 1.02 KiB/block |
-| Register-limited resident blocks/SM | 2 |
-| Shared-memory-limited resident blocks/SM | 2 |
-| Theoretical active warps/SM | 8 |
+| Registers per thread | **255** |
+| Dynamic shared memory per block | **49.15 KiB** |
+| Driver shared memory per block | 1.02 KiB |
+| Register-limited resident blocks per SM | **2** |
+| Shared-memory-limited resident blocks per SM | **2** |
+| Theoretical active warps per SM | 8 |
 | Theoretical occupancy | **16.67%** |
 | Achieved occupancy | **16.35%** |
 | L1/TEX throughput | **91.42%** |
-| Memory throughput (SOL) | 86.69% |
+| Overall memory throughput (SOL) | 86.69% |
 | Compute (SM) throughput | 22.80% |
 | L2 throughput | 10.43% |
 | DRAM throughput | 2.82% |
-| Nsight-reported duration | 1.74 ms |
+| Profiler-reported kernel duration | 1.74 ms |
 
-Both register and shared-memory requirements independently constrain residency to **two blocks per SM**. Eight resident warps against a maximum of 48 explain the **16.67% theoretical occupancy**. High L1/TEX throughput and low external DRAM throughput motivate a more detailed on-chip memory-path investigation.
+Four warps per program and two resource-limited resident blocks imply **eight active warps per SM**. Relative to the 48-warp maximum, this explains the measured **16.67% theoretical occupancy**. Both register usage and shared-memory allocation constrain residency. Meanwhile, the high L1/TEX throughput and low DRAM throughput justify a closer investigation of on-chip memory-path pressure.
 
-These figures **do not prove register spilling** or identify a single dominant bottleneck. The Nsight capture duration is also not directly comparable to unprofiled CUDA-event timings. Planned follow-up: local-memory traffic, scheduler/warp stalls, instruction mix, and causal tile-skipping opportunities.
+**Interpretation limits:** Low occupancy does not automatically identify the dominant stall reason; 255 registers per thread does **not** prove register spilling. Detailed local-memory, warp-stall, and instruction metrics are the next profiling targets. Nsight's instrumented duration should not be used interchangeably with unprofiled CUDA-event latency.
 
-## Running the experiments
+## Reproducing tests, benchmarks and profiling
 
 ```bash
+# Current generalized FP32 correctness tests
 uv run pytest tests/test2_forward.py -s
-uv run python benchmarks/benchmark_forward.py
+
+# Compare Triton with naive PyTorch and PyTorch SDPA
+uv run python benchmarks/benchmark_forward0.py
+
+# Sweep tile sizes, warp counts and pipeline stages
+uv run python benchmarks/benchmark_kernel_config.py
+
+# Single-workload profiling launcher (non-causal / causal)
+uv run python benchmarks/profile_forward.py
+uv run python benchmarks/profile_forward.py --causal
 ```
 
-The current `benchmarks/benchmark_forward.py` performs the **72-configuration sweep** and writes `benchmarks/results/kernel_config_sweep.csv`. Re-running it can overwrite existing CSV output. The older `benchmark_block_m_sweep.py` and `benchmark_block_n_sweep.py` target the previous two-dimensional prototype interface and require adaptation before use with the generalized kernel.
+For Nsight Compute, a representative non-causal capture command is:
 
-## Repository structure
+```bash
+ncu --set full \
+  --kernel-name-base demangled \
+  --kernel-name 'regex:flash_attention_forward_kernel' \
+  --launch-skip 10 \
+  --launch-count 1 \
+  -o profile_forward_noncausal \
+  uv run python benchmarks/profile_forward.py
+```
+
+**Repository maintenance note:** The historical `benchmark_block_m_sweep.py`, `benchmark_block_n_sweep.py`, `tests/test1_forward.py`, and `scripts/attention/forward_pass_demo.py` target the former two-dimensional API. They are retained as experimental history but require adaptation before running against the current four-dimensional kernel. Benchmark scripts may overwrite CSV files with matching output names; preserve published measurements before re-running experiments.
+
+## Repository layout
 
 ```text
 flash_infer/
 ├── src/flash_infer/
-│   ├── attention/forward_pass.py      # Triton kernel + public wrapper
-│   └── config.py                      # Tile and launch configuration
+│   ├── attention/forward_pass.py          # Triton kernel and public API
+│   └── config.py                          # Tile and launch parameters
 ├── tests/
-│   ├── test1_forward.py               # Earlier test cases
-│   └── test2_forward.py               # Generalized forward correctness
+│   ├── test1_forward.py                   # Legacy prototype tests
+│   └── test2_forward.py                   # Batched/multi-head correctness
 ├── benchmarks/
-│   ├── benchmark_block_m_sweep.py     # Historical prototype experiment
-│   ├── benchmark_block_n_sweep.py     # Historical prototype experiment
-│   ├── benchmark_forward.py           # Current launch-config sweep
-│   └── results/                       # Benchmark CSVs and tuning notes
+│   ├── benchmark_forward0.py              # PyTorch / SDPA / Triton comparison
+│   ├── benchmark_kernel_config.py         # Launch-configuration sweep
+│   ├── benchmark_block_m_sweep.py         # Historical query-tile sweep
+│   ├── benchmark_block_n_sweep.py         # Historical key/value-tile sweep
+│   ├── profile_forward.py                 # Nsight profiling workload
+│   ├── common/result.py                   # CSV results utility
+│   └── results/                           # Recorded data and tuning notes
 ├── docs/flash_attention/
-│   └── flash_attention.md             # Mathematical implementation notes
+│   └── flash_attention.md                 # Detailed online-softmax notes
+├── profile_forward_noncausal.ncu-rep      # First saved Nsight report
 ├── pyproject.toml
 ├── uv.lock
 └── README.md
@@ -223,20 +319,20 @@ flash_infer/
 
 ## Roadmap
 
-1. **Diagnose the current hardware bottleneck** using detailed Nsight Compute counters, including potential register spilling and warp stalls.
-2. **Optimize forward** through resource-aware tiling, execution layouts, improved causal processing, and suitable precision paths.
-3. **Extend correctness coverage** to FP16, BF16, additional head dimensions, non-contiguous layouts, and numerical edge cases.
-4. **Publish controlled benchmarks** with explicitly identified SDPA backend and consistent GPU operating conditions.
-5. **Implement backward** and validate gradients with respect to `Q`, `K`, and `V` against PyTorch autograd.
+1. **Characterize the forward bottleneck:** inspect local-memory transactions, register spills, warp stalls, instruction mix, and L1/TEX activity.
+2. **Optimize causal execution:** avoid visiting wholly future K/V tiles while preserving numerical behavior.
+3. **Improve computational efficiency:** investigate compiler-generated layouts, register/shared-memory pressure, and suitable lower-precision or Tensor Core execution paths.
+4. **Extend correctness and reproducibility:** validate FP16/BF16, non-contiguous inputs, multi-tile and adversarial cases; standardize SDPA backend selection and CUDA Graph benchmarking.
+5. **Implement backward:** derive and test gradients with respect to `Q`, `K`, and `V` against PyTorch autograd after the forward implementation is characterized.
 
 ## References
 
 - [FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness](https://arxiv.org/abs/2205.14135)
 - [FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning](https://arxiv.org/abs/2307.08691)
-- [Triton documentation and tutorials](https://triton-lang.org/main/getting-started/tutorials/index.html)
+- [Triton tutorials](https://triton-lang.org/main/getting-started/tutorials/index.html)
 - [PyTorch scaled dot-product attention](https://docs.pytorch.org/docs/stable/generated/torch.nn.functional.scaled_dot_product_attention.html)
-- [NVIDIA Nsight Compute documentation](https://docs.nvidia.com/nsight-compute/)
+- [NVIDIA Nsight Compute](https://docs.nvidia.com/nsight-compute/)
 
 ---
 
-**Development status:** Forward v1 has passed the documented FP32 correctness tests. Profiling-guided optimization and backward support are ongoing.
+**Current milestone:** Forward attention implemented and validated for the documented FP32 cases. Profiling-guided optimization and backward support remain in development.
