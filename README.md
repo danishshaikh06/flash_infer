@@ -31,7 +31,7 @@ FlashInfer is an experimental GPU kernel-engineering project focused on implemen
 Scaled dot-product attention computes
 
 $$
-O = \operatorname{softmax}\!\left(\frac{QK^\top}{\sqrt{D}}\right)V.
+O = \mathrm{softmax}\!\left(\frac{QK^\top}{\sqrt{D}}\right)V.
 $$
 
 A straightforward implementation may materialize the intermediate score tensor with shape `[B,H,N,N]`. With `B=1`, `H=16`, `N=1024`, and FP32 scores, that tensor alone requires
@@ -80,10 +80,10 @@ Given a new score tile `S = Q_tile @ K_tile.T / sqrt(D)`, the recurrence is
 
 $$
 \begin{aligned}
-m' &= \max\left(m,\operatorname{rowmax}(S)\right),\\
+m' &= \max\left(m,\mathrm{rowmax}(S)\right),\\
 \alpha &= \exp(m-m'),\\
 P &= \exp(S-m'),\\
-l' &= \alpha l + \operatorname{rowsum}(P),\\
+l' &= \alpha l + \mathrm{rowsum}(P),\\
 acc' &= \alpha\,acc + PV.
 \end{aligned}
 $$
